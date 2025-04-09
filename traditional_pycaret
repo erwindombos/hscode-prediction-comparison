@@ -1,0 +1,86 @@
+import pandas as pd
+import re
+from sklearn.model_selection import train_test_split
+from pycaret.classification import *
+from tqdm import tqdm
+
+# Load the data
+data = pd.read_excel('/content/random_sampling15rb.xlsx')
+
+# Remove classes with less than 10 samples
+class_counts = data['HS_CODE'].value_counts()
+classes_to_keep = class_counts[class_counts >= 10].index
+data = data[data['HS_CODE'].isin(classes_to_keep)]
+
+def preprocess_text(text):
+    if isinstance(text, str):
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z0-9\s]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+    else:
+        text = ''
+    return text
+
+# Preprocess text
+tqdm.pandas(desc="Preprocessing")
+data['URAIAN'] = data['URAIAN'].progress_apply(preprocess_text)
+
+# Tokenization
+def tokenize(text):
+    return text.split()
+
+data['URAIAN'] = data['URAIAN'].progress_apply(tokenize)
+data['URAIAN'] = data['URAIAN'].apply(lambda x: ' '.join(x))
+
+# Split the dataset into train and test sets
+train_data, test_data = train_test_split(data, test_size=0.2, random_state=42)
+
+# Ensure training data has no classes with fewer than 10 instances
+class_distribution = train_data['HS_CODE'].value_counts()
+valid_classes = class_distribution[class_distribution >= 10].index
+filtered_train_data = train_data[train_data['HS_CODE'].isin(valid_classes)]
+
+# Check if filtered_train_data is empty
+if filtered_train_data.empty:
+    raise ValueError("Filtered training data is empty. Please check the preprocessing steps.")
+
+print("Filtered training data shape:", filtered_train_data.shape)
+print("Class distribution:\n", filtered_train_data['HS_CODE'].value_counts())
+
+# Setup the PyCaret environment
+clf_setup = setup(data=filtered_train_data,
+                  target='HS_CODE',
+                  session_id=42,
+                  use_gpu=False,
+                  html=False)
+
+# Compare models
+try:
+    with tqdm(total=1, desc="Comparing Models") as pbar:
+        best_model = compare_models(include=['knn', 'nb', 'rf', 'svm'])
+        pbar.update(1)
+except Exception as e:
+    print("Error during model comparison:", e)
+
+# Check if a model was selected
+if best_model is None:
+    raise ValueError("No model was selected. Please check the dataset and model comparison step.")
+
+# Evaluate the selected model
+evaluate_model(best_model)
+
+# Finalize the model
+with tqdm(total=1, desc="Finalizing Model") as pbar:
+    final_model = finalize_model(best_model)
+    pbar.update(1)
+
+# Predict on the test set
+with tqdm(total=1, desc="Predicting on Test Set") as pbar:
+    predictions = predict_model(final_model, data=test_data)
+    pbar.update(1)
+
+# Display predictions
+print(predictions[['HS_CODE', 'Label', 'Score']])
+
+# Evaluate model performance on the test set
+evaluate_model(final_model)

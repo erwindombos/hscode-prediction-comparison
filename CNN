@@ -1,0 +1,187 @@
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import re
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.preprocessing import LabelEncoder
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from gensim.models import Word2Vec
+import nltk
+
+# Download necessary NLTK data
+nltk.download('punkt_tab')
+nltk.download('stopwords')
+
+# Load the Excel file
+df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')
+
+
+# Preprocess the data
+def preprocess_text(text):
+    text = text.lower()  # Lowercase
+    text = re.sub(r'[^\w\s]', '', text)  # Remove special characters
+    text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
+    return text
+
+
+# Remove NaN values and preprocess text
+df.dropna(subset=['HS_CODE', 'URAIAN'], inplace=True)
+df['URAIAN'] = df['URAIAN'].apply(preprocess_text)
+
+# Tokenization using Punkt tokenizer
+df['tokens'] = df['URAIAN'].apply(word_tokenize)
+
+# Train Word2Vec model
+word2vec_model = Word2Vec(sentences=df['tokens'], vector_size=100, window=5, min_count=1, workers=4)
+
+# Prepare data for training
+label_encoder = LabelEncoder()
+df['HS_CODE'] = label_encoder.fit_transform(df['HS_CODE'])
+X_train, X_test, y_train, y_test = train_test_split(df['tokens'], df['HS_CODE'], test_size=0.2, random_state=42)
+
+
+# Create a custom dataset class
+class CommodityDataset(Dataset):
+    def __init__(self, tokens, labels, word2vec_model, max_len):
+        self.tokens = tokens
+        self.labels = labels
+        self.word2vec_model = word2vec_model
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.tokens)
+
+    def __getitem__(self, idx):
+        tokens = self.tokens[idx]
+        label = self.labels[idx]
+
+        # Get embeddings for each token
+        embeddings = np.zeros((self.max_len, self.word2vec_model.vector_size))
+        for i, token in enumerate(tokens[:self.max_len]):
+            if token in self.word2vec_model.wv:
+                embeddings[i] = self.word2vec_model.wv[token]
+
+        return {
+            'embeddings': torch.tensor(embeddings, dtype=torch.float32),
+            'labels': torch.tensor(label, dtype=torch.long)
+        }
+
+
+# Prepare datasets and dataloaders
+max_len = 128
+train_dataset = CommodityDataset(X_train.to_numpy(), y_train.to_numpy(), word2vec_model, max_len)
+test_dataset = CommodityDataset(X_test.to_numpy(), y_test.to_numpy(), word2vec_model, max_len)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+
+
+# Define the CNN model
+class CNNModel(nn.Module):
+    def __init__(self, n_classes):
+        super(CNNModel, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels=100, out_channels=256, kernel_size=3)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(kernel_size=2)
+        self.fc = nn.Linear(256 * ((max_len - 3 + 1) // 2), n_classes)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+
+# Initialize the model, loss function, and optimizer
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = CNNModel(n_classes=len(label_encoder.classes_)).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+
+# Train the model
+def train_epoch(model, data_loader, criterion, optimizer, device):
+    model.train()
+    losses = []
+    correct_predictions = 0
+
+    for data in data_loader:
+        embeddings = data['embeddings'].to(device)
+        labels = data['labels'].to(device)
+
+        outputs = model(embeddings)
+        _, preds = torch.max(outputs, dim=1)
+        loss = criterion(outputs, labels)
+
+        correct_predictions += torch.sum(preds == labels)
+        losses.append(loss.item())
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return correct_predictions.double() / len(data_loader.dataset), np.mean(losses)
+
+
+# Evaluate the model
+def eval_model(model, data_loader, criterion, device):
+    model.eval()
+    losses = []
+    correct_predictions = 0
+
+    with torch.no_grad():
+        for data in data_loader:
+            embeddings = data['embeddings'].to(device)
+            labels = data['labels'].to(device)
+
+            outputs = model(embeddings)
+            _, preds = torch.max(outputs, dim=1)
+            loss = criterion(outputs, labels)
+
+            correct_predictions += torch.sum(preds == labels)
+            losses.append(loss.item())
+
+    return correct_predictions.double() / len(data_loader.dataset), np.mean(losses)
+
+
+# Training loop
+n_epochs = 5
+for epoch in range(n_epochs):
+    train_acc, train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+    print(f'Epoch {epoch + 1}/{n_epochs}, Train Loss: {train_loss}, Train Accuracy: {train_acc}')
+
+# Evaluate the model
+y_true = []
+y_pred = []
+
+model.eval()
+with torch.no_grad():
+    for data in test_loader:
+        embeddings = data['embeddings'].to(device)
+        labels = data['labels'].to(device)
+
+        outputs = model(embeddings)
+        _, preds = torch.max(outputs, dim=1)
+
+        y_true.extend(labels.cpu().numpy())
+        y_pred.extend(preds.cpu().numpy())
+
+# Calculate evaluation metrics
+accuracy = accuracy_score(y_true, y_pred)
+precision = precision_score(y_true, y_pred, average='weighted')
+recall = recall_score(y_true, y_pred, average='weighted')
+f1 = f1_score(y_true, y_pred, average='weighted')
+
+print(f'Accuracy: {accuracy}')
+print(f'Precision: {precision}')
+print(f'Recall: {recall}')
+print(f'F1 Score: {f1}')

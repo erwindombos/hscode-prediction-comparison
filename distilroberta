@@ -1,0 +1,157 @@
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from tqdm import tqdm
+import torch
+from torch import nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics.pairwise import cosine_similarity
+
+class CustomDataset(Dataset):
+    def __init__(self, texts, labels):
+        self.texts = texts
+        self.labels = labels.long()  # Ensure labels are LongTensor
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        return self.texts[idx], self.labels[idx]
+
+# Custom Classifier model
+class HSCodeClassifier(nn.Module):
+    def __init__(self, embedding_dim, num_classes):
+        super(HSCodeClassifier, self).__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(embedding_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        return self.classifier(x)
+
+    # Main function
+def main():
+    # 1. Load and preprocess data
+    print("Loading data...")
+    df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')
+
+    # Remove classes with less than 10 samples
+    class_counts = df['HS_CODE'].value_counts()
+    classes_to_keep = class_counts[class_counts >= 10].index
+    df = df[df['HS_CODE'].isin(classes_to_keep)]
+
+
+    # 2. Prepare labels
+    label_encoder = LabelEncoder()
+    encoded_labels = label_encoder.fit_transform(df['HS_CODE'])
+    num_classes = len(label_encoder.classes_)
+
+    # 3. Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        df['URAIAN'].values, encoded_labels,
+        test_size=0.2, random_state=42
+    )
+
+    # 4. Load SBERT model
+    print("Loading SBERT model...")
+    sbert_model = SentenceTransformer("sentence-transformers/all-distilroberta-v1")
+
+    # 5. Generate embeddings with progress bar
+    print("Generating embeddings...")
+    train_embeddings = []
+    test_embeddings = []
+
+    for text in tqdm(X_train, desc="Encoding training data"):
+        embedding = sbert_model.encode(text)
+        train_embeddings.append(embedding)
+
+    for text in tqdm(X_test, desc="Encoding testing data"):
+        embedding = sbert_model.encode(text)
+        test_embeddings.append(embedding)
+
+    train_embeddings = torch.tensor(np.array(train_embeddings), dtype=torch.float32)
+    test_embeddings = torch.tensor(np.array(test_embeddings), dtype=torch.float32)
+
+    # 6. Create datasets and dataloaders
+    train_dataset = CustomDataset(train_embeddings, torch.tensor(y_train, dtype=torch.long))
+    test_dataset = CustomDataset(test_embeddings, torch.tensor(y_test, dtype=torch.long))
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32)
+
+    # 7. Initialize model, loss function, and optimizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = HSCodeClassifier(768, num_classes).to(device)  # Corrected to 512
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    sample_embedding = sbert_model.encode(X_train[0])
+    print("Embedding size:", sample_embedding.shape)
+
+    # 8. Training loop
+    num_epochs = 10
+    print("Training model...")
+
+    for epoch in tqdm(range(num_epochs), desc="Training epochs"):
+        model.train()
+        for batch_embeddings, batch_labels in tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False):
+            batch_embeddings = batch_embeddings.to(device)
+            batch_labels = batch_labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(batch_embeddings)
+            loss = criterion(outputs, batch_labels)
+            loss.backward()
+            optimizer.step()
+
+    # Evaluation with cosine similarity
+    print("Evaluating model...")
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    # Calculate class embeddings
+    class_embeddings = []
+    for class_idx in range(num_classes):
+        class_texts = df[df['HS_CODE'] == label_encoder.classes_[class_idx]]['URAIAN'].values
+        class_embedding = np.mean([sbert_model.encode(text) for text in class_texts], axis=0)
+        class_embeddings.append(class_embedding)
+    class_embeddings = np.array(class_embeddings)
+
+    with torch.no_grad():
+        for batch_embeddings, batch_labels in tqdm(test_loader, desc="Evaluating"):
+            batch_embeddings = batch_embeddings.to(device)
+            outputs = model(batch_embeddings)
+
+            # Calculate cosine similarity
+            similarities = cosine_similarity(batch_embeddings.cpu().numpy(), class_embeddings)
+
+            # Combine model outputs with cosine similarities
+            combined_scores = outputs.cpu().numpy() + similarities
+
+            # Make final predictions
+            predicted = np.argmax(combined_scores, axis=1)
+            all_preds.extend(predicted)
+            all_labels.extend(batch_labels.numpy())
+
+    # Calculate metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    print("\nEvaluation Metrics:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    
+if __name__ == "__main__":
+    main()

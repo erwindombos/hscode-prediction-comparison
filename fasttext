@@ -1,0 +1,123 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import fasttext
+import re
+from tqdm import tqdm
+import time
+import os
+
+# Function to clean and preprocess text
+def preprocess_text(text):
+    # Convert to lowercase
+    text = str(text).lower()
+    # Remove special characters and digits
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\d+', ' ', text)
+    # Remove extra whitespace
+    text = ' '.join(text.split())
+    return text
+
+# 1. Load and prepare data
+print("Loading and preparing data...")
+df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')
+
+# Remove classes with less than 10 samples
+class_counts = df['HS_CODE'].value_counts()
+classes_to_keep = class_counts[class_counts >= 10].index
+df = df[df['HS_CODE'].isin(classes_to_keep)]
+
+# 2. Preprocess data
+print("Preprocessing text data...")
+tqdm.pandas()
+df['URAIAN_CLEAN'] = df['URAIAN'].progress_apply(preprocess_text)
+
+# 3. Prepare data for FastText format
+print("Preparing FastText format...")
+# Create temporary files for FastText
+train_file = "fasttext_train.txt"
+test_file = "fasttext_test.txt"
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    df['URAIAN_CLEAN'],
+    df['HS_CODE'],
+    test_size=0.2,
+    random_state=42
+)
+
+# Write training data
+with open(train_file, 'w', encoding='utf-8') as f:
+    for text, label in tqdm(zip(X_train, y_train), total=len(X_train)):
+        f.write(f"__label__{label} {text}\n")
+
+# Write test data
+with open(test_file, 'w', encoding='utf-8') as f:
+    for text, label in tqdm(zip(X_test, y_test), total=len(X_test)):
+        f.write(f"__label__{label} {text}\n")
+
+# 4. Train FastText model
+print("Training FastText model...")
+start_time = time.time()
+
+model = fasttext.train_supervised(
+    input=train_file,
+    epoch=25,
+    lr=1.0,
+    wordNgrams=2,
+    verbose=2,
+    minCount=1
+)
+
+training_time = time.time() - start_time
+print(f"Training completed in {training_time:.2f} seconds")
+
+# 5. Evaluate model
+print("Evaluating model...")
+
+# Function to get predictions
+def get_predictions(texts):
+    predictions = []
+    for text in tqdm(texts):
+        pred = model.predict(text)[0][0].replace('__label__', '')
+        predictions.append(pred)
+    return predictions
+
+# Get predictions
+y_pred = get_predictions(X_test)
+
+# Calculate metrics
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred, average='weighted')
+recall = recall_score(y_test, y_pred, average='weighted')
+f1 = f1_score(y_test, y_pred, average='weighted')
+
+print("\nEvaluation Metrics:")
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+
+# 6. Save model
+print("\nSaving model...")
+model.save_model("fasttext_hs_code_model.bin")
+
+# 7. Clean up temporary files
+os.remove(train_file)
+os.remove(test_file)
+
+print("Process completed!")
+
+# Example of how to use the model for prediction
+def predict_hs_code(text):
+    cleaned_text = preprocess_text(text)
+    prediction = model.predict(cleaned_text)[0][0].replace('__label__', '')
+    return prediction
+
+# Example usage
+example_text = "Your commodity description here"
+predicted_hs_code = predict_hs_code(example_text)
+print(f"\nExample prediction:")
+print(f"Text: {example_text}")
+print(f"Predicted HS Code: {predicted_hs_code}")

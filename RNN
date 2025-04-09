@@ -1,0 +1,181 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from tqdm import tqdm
+import nltk
+from nltk.tokenize import word_tokenize
+from collections import Counter
+
+# Download required NLTK data
+nltk.download('punkt')
+
+# Check if CUDA is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+# 1. Data Loading and Preprocessing
+print("Loading and preprocessing data...")
+def load_and_preprocess_data(file_path):
+    df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')
+    # Remove classes with less than 10 samples
+    class_counts = df['HS_CODE'].value_counts()
+    classes_to_keep = class_counts[class_counts >= 10].index
+    df = df[df['HS_CODE'].isin(classes_to_keep)]
+
+    # Convert to lowercase and tokenize
+    df['tokenized'] = df['URAIAN'].str.lower().apply(word_tokenize)
+
+    return df
+
+# 2. Vocabulary Creation
+def create_vocabulary(tokenized_texts):
+    vocab = Counter()
+    for tokens in tokenized_texts:
+        vocab.update(tokens)
+
+    # Create word to index mapping
+    word2idx = {'<PAD>': 0, '<UNK>': 1}
+    for word in vocab:
+        if word not in word2idx:
+            word2idx[word] = len(word2idx)
+
+    return word2idx
+
+# 3. Custom Dataset Class
+class HSCodeDataset(Dataset):
+    def __init__(self, texts, labels, word2idx, max_length=100):
+        self.texts = texts
+        self.labels = labels
+        self.word2idx = word2idx
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        tokens = self.texts[idx]
+        # Convert tokens to indices and pad
+        indices = [self.word2idx.get(token, self.word2idx['<UNK>']) for token in tokens]
+        if len(indices) < self.max_length:
+            indices += [self.word2idx['<PAD>']] * (self.max_length - len(indices))
+        else:
+            indices = indices[:self.max_length]
+
+        return torch.tensor(indices), self.labels[idx]
+
+# 4. RNN Model
+class RNNModel(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim):
+        super(RNNModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.rnn = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(hidden_dim * 2, output_dim)
+
+    def forward(self, x):
+        embedded = self.embedding(x)
+        output, (hidden, cell) = self.rnn(embedded)
+        hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim=1)
+        return self.fc(hidden)
+
+# 5. Training Function
+def train_model(model, train_loader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0
+
+    for batch in tqdm(train_loader, desc="Training"):
+        texts, labels = batch
+        texts, labels = texts.to(device), labels.long().to(device)
+
+        optimizer.zero_grad()
+        predictions = model(texts)
+        loss = criterion(predictions, labels)
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(train_loader)
+
+# 6. Evaluation Function
+def evaluate_model(model, test_loader, device):
+    model.eval()
+    all_predictions = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Evaluating"):
+            texts, labels = batch
+            texts, labels = texts.to(device), labels.to(device)
+
+            predictions = model(texts)
+            predictions = torch.argmax(predictions, dim=1)
+
+            all_predictions.extend(predictions.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    return all_predictions, all_labels
+
+# Main execution
+def main():
+    # Load and preprocess data
+    df = load_and_preprocess_data('dataset_pib_cleaned.txt')
+
+    # Create vocabulary
+    word2idx = create_vocabulary(df['tokenized'])
+
+    # Prepare labels
+    label_encoder = LabelEncoder()
+    encoded_labels = label_encoder.fit_transform(df['HS_CODE'])
+
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        df['tokenized'], encoded_labels, test_size=0.2, random_state=42
+    )
+
+    # Create datasets and dataloaders
+    train_dataset = HSCodeDataset(X_train.values, y_train, word2idx)
+    test_dataset = HSCodeDataset(X_test.values, y_test, word2idx)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32)
+
+    # Initialize model and training components
+    model = RNNModel(
+        vocab_size=len(word2idx),
+        embedding_dim=100,
+        hidden_dim=128,
+        output_dim=len(label_encoder.classes_)
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters())
+
+    # Training loop
+    num_epochs = 10
+    for epoch in tqdm(range(num_epochs), desc="Epochs"):
+        train_loss = train_model(model, train_loader, criterion, optimizer, device)
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}")
+
+    # Evaluation
+    predictions, labels = evaluate_model(model, test_loader, device)
+
+    # Calculate metrics
+    accuracy = accuracy_score(labels, predictions)
+    precision = precision_score(labels, predictions, average='weighted')
+    recall = recall_score(labels, predictions, average='weighted')
+    f1 = f1_score(labels, predictions, average='weighted')
+
+    print("\nEvaluation Metrics:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1-Score: {f1:.4f}")
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,7 @@ from pycaret.classification import *
 from tqdm import tqdm
 
 # Load the data
-data = pd.read_excel('/content/random_sampling15rb.xlsx')
+data = pd.read_csv('/content/dataset_pib_cleaned.txt')
 
 # Remove classes with less than 10 samples
 class_counts = data['HS_CODE'].value_counts()

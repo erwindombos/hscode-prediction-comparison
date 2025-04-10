@@ -20,7 +20,7 @@ nltk.download('stopwords')
 
 # Load the Excel file
 df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')
-# Remove classes with less than 10 samples
+# Remove classes with less than 4 samples
 class_counts = df['HS_CODE'].value_counts()
 classes_to_keep = class_counts[class_counts >= 4].index
 df = df[df['HS_CODE'].isin(classes_to_keep)]

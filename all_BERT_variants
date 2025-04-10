@@ -41,7 +41,10 @@ def main():
     # 1. Load and preprocess data
     print("Loading data...")
     df = pd.read_csv('dataset_pib_cleaned.txt', dtype='str')  # Adjust separator as needed
-    #df = pd.read_excel('sampling_baru_cleaned.xlsx')  # Adjust separator as needed
+    # Remove classes with less than 4 samples
+    class_counts = df['HS_CODE'].value_counts()
+    classes_to_keep = class_counts[class_counts >= 4].index
+    df = df[df['HS_CODE'].isin(classes_to_keep)]
 
 
     # 2. Prepare labels

@@ -1,0 +1,160 @@
+import pandas as pd
+import numpy as np
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import re
+import string
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+import multiprocessing
+import warnings
+warnings.filterwarnings('ignore')
+
+# Download required NLTK data
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+nltk.download('averaged_perceptron_tagger')
+
+# Step 1: Enhanced Data Loading and Preprocessing
+print("Step 1: Loading and preprocessing the data...")
+df = pd.read_excel('dataset_baru.xlsx')
+
+df.head()
+
+# Remove rows with NaN values and duplicates
+df = df.dropna(subset=['hs_code', 'commodity_description'])
+df = df.drop_duplicates()
+
+# Convert HS codes to categorical and get numerical labels
+df['hs_code'] = pd.Categorical(df['hs_code'])
+df['hs_code_num'] = df['hs_code'].cat.codes
+
+print(f"Number of unique HS codes: {len(df['hs_code'].unique())}")
+print(f"Dataset shape: {df.shape}")
+
+# Step 2: Enhanced Text Cleaning
+print("\nStep 2: Enhanced text cleaning...")
+
+def enhanced_clean_text(text):
+    # Convert to lowercase
+    text = str(text).lower()
+
+    # Remove URLs
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+
+    # Remove email addresses
+    text = re.sub(r'\S+@\S+', '', text)
+
+    # Remove special characters but keep important product-related characters
+    text = re.sub(r'[^a-zA-Z0-9%\-./]', ' ', text)
+
+    # Remove extra whitespace
+    text = ' '.join(text.split())
+
+    return text
+
+# Initialize lemmatizer
+lemmatizer = WordNetLemmatizer()
+
+def enhanced_tokenize_text(text):
+    # Clean the text
+    text = enhanced_clean_text(text)
+
+    # Tokenize
+    tokens = word_tokenize(text)
+
+    # Remove stopwords and lemmatize
+    stop_words = set(stopwords.words('english'))
+    tokens = [lemmatizer.lemmatize(token) for token in tokens if token not in stop_words]
+
+    # Remove very short tokens
+    tokens = [token for token in tokens if len(token) > 2]
+
+    return tokens
+
+# Create enhanced tagged documents
+tagged_data = [TaggedDocument(words=enhanced_tokenize_text(text),
+                              tags=[str(tag)])
+               for text, tag in zip(df['commodity_description'], df['hs_code'])]
+
+# Step 3: Improved Data Split with Stratification
+print("\nStep 3: Splitting data with stratification...")
+train_data, test_data = train_test_split(
+    tagged_data,
+    test_size=0.2,
+    random_state=42,
+    shuffle=True
+)
+
+# Step 4: Enhanced Doc2Vec Model
+print("\nStep 4: Training enhanced Doc2Vec model...")
+
+# Hyperparameter optimization
+vector_size = 300  # Increased vector size
+window_size = 15   # Increased context window
+min_count = 2      # Minimum frequency of words
+epochs = 30        # Increased number of epochs
+alpha = 0.025      # Initial learning rate
+min_alpha = 0.0001 # Minimum learning rate
+negative = 5       # Number of negative samples
+
+cores = multiprocessing.cpu_count()
+print(f"Training using {cores} cores")
+
+# Initialize enhanced Doc2Vec model
+model = Doc2Vec(
+    vector_size=vector_size,
+    window=window_size,
+    min_count=min_count,
+    dm=1,  # Using PV-DM
+    alpha=alpha,
+    min_alpha=min_alpha,
+    negative=negative,
+    workers=cores,
+    epochs=epochs,
+    hs=0  # Negative sampling instead of hierarchical softmax
+)
+
+# Build vocabulary
+model.build_vocab(train_data)
+
+# Implement learning rate decay
+alpha_delta = (alpha - min_alpha) / epochs
+
+# Train with learning rate decay
+print("\nTraining model with learning rate decay...")
+for epoch in range(epochs):
+    current_alpha = alpha - (epoch * alpha_delta)
+    model.alpha = current_alpha
+    model.min_alpha = current_alpha
+    model.train(train_data,
+                total_examples=model.corpus_count,
+                epochs=1)
+    print(f"Epoch {epoch + 1}/{epochs}, Alpha: {current_alpha:.6f}")
+
+# Step 5: Improved Prediction Function
+def improved_predict_hs_code(model, text, topn=5):
+    # Enhanced tokenization
+    tokens = enhanced_tokenize_text(text)
+
+    # Infer vector with more steps
+    vector = model.infer_vector(tokens, steps=50)  # Increased inference steps
+
+    # Find most similar vectors
+    similar_docs = model.dv.most_similar([vector], topn=topn)
+
+    # Use voting mechanism for top predictions
+    votes = {}
+    for doc, score in similar_docs:
+        if doc not in votes:
+            votes[doc] = score
+        else:
+            votes[doc] += score
+
+    # Return the HS code with highest vote
+    return max(votes.items(), key=lambda x: x[1])[0]
+
